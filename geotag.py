@@ -286,34 +286,58 @@ def main(bin_file, image_dir, alt_threshold=40.0):
     time_offset = first_air_cam['time'] - first_image['time']
     print(f"Calculated time offset: {time_offset.total_seconds():.2f} seconds")
     
-    # Tag images
-    tagged_count = 0
+    # Calculate locations
     tagged_images_data = []
-    print("\nStarting geotagging process...")
+    print("\nCalculating GPS coordinates for images...")
     
     for img in images:
         corrected_time = img['time'] + time_offset
         gps = interpolate_gps(gps_data, corrected_time)
         
         if gps:
-            success = set_gps_exif(img['path'], gps['lat'], gps['lng'], gps['alt'])
-            if success:
-                tagged_count += 1
-                tagged_images_data.append({
-                    'path': img['path'],
-                    'lat': gps['lat'],
-                    'lng': gps['lng'],
-                    'alt': gps['alt']
-                })
-                print(f"Tagged {os.path.basename(img['path'])} -> Lat: {gps['lat']:.6f}, Lng: {gps['lng']:.6f}")
+            tagged_images_data.append({
+                'path': img['path'],
+                'lat': gps['lat'],
+                'lng': gps['lng'],
+                'alt': gps['alt']
+            })
+            print(f"Calculated {os.path.basename(img['path'])} -> Lat: {gps['lat']:.6f}, Lng: {gps['lng']:.6f}")
         else:
             print(f"Warning: Could not interpolate GPS for {os.path.basename(img['path'])} at {corrected_time}")
             
-    print(f"\nDone! Successfully tagged {tagged_count} out of {len(images)} images.")
+    print(f"\nCalculated locations for {len(tagged_images_data)} out of {len(images)} images.")
     
     if tagged_images_data:
         kmz_path = os.path.join(image_dir, "geotags.kmz")
         create_kmz(tagged_images_data, kmz_path)
+        
+        print(f"\nPlease review the generated KMZ file: {kmz_path}")
+        
+        # Prompt user for confirmation
+        while True:
+            user_input = input("Do you want to proceed and write the GPS data into the image EXIF? This may take some time. (y/n): ").strip().lower()
+            if user_input in ['y', 'yes']:
+                write_exif = True
+                break
+            elif user_input in ['n', 'no']:
+                write_exif = False
+                break
+            else:
+                print("Please enter 'y' or 'n'.")
+                
+        if write_exif:
+            print("\nStarting EXIF geotagging process...")
+            tagged_count = 0
+            for img_data in tagged_images_data:
+                success = set_gps_exif(img_data['path'], img_data['lat'], img_data['lng'], img_data['alt'])
+                if success:
+                    tagged_count += 1
+                    print(f"Tagged {os.path.basename(img_data['path'])}")
+            print(f"\nDone! Successfully tagged {tagged_count} out of {len(tagged_images_data)} images.")
+        else:
+            print("\nSkipping EXIF writing. Original images remain unmodified.")
+    else:
+        print("\nNo images were successfully matched with GPS data.")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Geotag drone images using a .bin log file in the same folder.')
