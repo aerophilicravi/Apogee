@@ -36,7 +36,12 @@ Standalone cameras rarely have their clocks perfectly synced to the millisecond 
 python geotag.py
 ```
 
-That's it! The script will install its own dependencies, find the files, calculate the time offset, inject the GPS data into the images, and generate a KMZ map.
+That's it! The script will install its own dependencies, find the files, calculate the time offset, and generate a `geotags.kmz` map. 
+
+You can then open the KMZ file in Google Earth to verify the locations are correct. The script will pause and ask:
+`Do you want to proceed and write the GPS data into the image EXIF?`
+
+If you are happy with the locations, type `y` to start the time-consuming process of injecting the GPS data into the images.
 
 ## ⚙️ Advanced Usage (Command Line Arguments)
 
