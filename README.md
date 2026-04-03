@@ -9,7 +9,8 @@ Perfect for drone mappers, surveyors, and hobbyists using standalone cameras (li
 * **Auto-Dependency Installer:** No need to mess with `pip`. The script automatically checks for and installs required packages (`piexif`, `pymavlink`) if they are missing.
 * **Smart Time Synchronization:** Automatically calculates the time drift between your camera's internal clock and the drone's GPS clock.
 * **Precise Interpolation:** Calculates the exact microsecond location of the drone between GPS pings for pinpoint accuracy.
-* **Google Earth Export:** Automatically generates a `geotags.kmz` file so you can visually verify your photo locations in Google Earth.
+* **Google Earth Export with Thumbnails:** Automatically generates a `geotags.kmz` file with embedded image thumbnails. When you click a pin in Google Earth, you can instantly see a preview of the photo for faster Quality Control (QC).
+* **Custom Logo Support:** Place your company logo (e.g., `indrones_logo.png`) in the same folder, and it will automatically be embedded and displayed in the top-left corner of Google Earth.
 
 ## 🧠 How It Works (The Logic)
 Standalone cameras rarely have their clocks perfectly synced to the millisecond with a drone's GPS. This script solves that by using a smart altitude threshold:
