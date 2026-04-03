@@ -2,10 +2,14 @@ import os
 import glob
 import argparse
 import zipfile
+import io
 from datetime import datetime, timedelta
 from fractions import Fraction
 import sys
 import subprocess
+import concurrent.futures
+import multiprocessing
+import time
 
 # --- AUTO-INSTALLER FOR REQUIRED PACKAGES ---
 def install_package(package_name):
@@ -31,6 +35,13 @@ try:
 except ImportError:
     install_package("pymavlink")
     from pymavlink import mavutil
+
+# Check and import PIL (Pillow) for thumbnails
+try:
+    from PIL import Image
+except ImportError:
+    install_package("Pillow")
+    from PIL import Image
 # --------------------------------------------
 
 def get_exif_time(image_path):
@@ -202,39 +213,146 @@ def interpolate_gps(gps_data, target_time):
     
     return {'lat': lat, 'lng': lng, 'alt': alt}
 
-def create_kmz(tagged_images, output_path):
+def generate_thumbnail_worker(img_data):
+    try:
+        with Image.open(img_data['path']) as pil_img:
+            pil_img.thumbnail((400, 400))
+            thumb_io = io.BytesIO()
+            pil_img.save(thumb_io, format='JPEG')
+            return img_data['path'], thumb_io.getvalue(), None
+    except Exception as e:
+        return img_data['path'], None, str(e)
+
+def set_gps_exif_worker(img_data):
+    success = set_gps_exif(img_data['path'], img_data['lat'], img_data['lng'], img_data['alt'])
+    return img_data['path'], success
+
+def benchmark_and_get_workers(worker_func, sample_items, task_name):
+    if len(sample_items) < 10:
+        return False, 1
+        
+    print(f"\nRunning micro-benchmark for {task_name} to determine optimal processing mode...")
+    
+    sample_seq = sample_items[0:2]
+    sample_par = sample_items[2:4]
+    
+    # Sequential
+    t0 = time.time()
+    for item in sample_seq:
+        worker_func(item)
+    seq_time = time.time() - t0
+    
+    # Parallel
+    t0 = time.time()
+    with concurrent.futures.ProcessPoolExecutor(max_workers=2) as executor:
+        list(executor.map(worker_func, sample_par))
+    par_time = time.time() - t0
+    
+    print(f"  -> Sequential time (2 items): {seq_time:.2f}s")
+    print(f"  -> Parallel time (2 items): {par_time:.2f}s")
+    
+    if par_time < seq_time * 0.85: # Parallel is at least 15% faster
+        workers = min(multiprocessing.cpu_count() or 2, 8)
+        print(f"  -> Result: Multiprocessing is faster. Using {workers} workers.")
+        return True, workers
+    else:
+        print("  -> Result: Sequential is faster or similar (likely HDD/SD Card). Using 1 worker.")
+        return False, 1
+
+def create_kmz(tagged_images, output_path, image_dir):
     kml_header = '''<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
     <name>Geotagged Images</name>'''
     
+    # Check for logo
+    logo_kml = ""
+    logo_filename = None
+    logo_path = None
+    
+    # Look for indrones logo or any logo png/jpg
+    possible_logos = glob.glob(os.path.join(image_dir, "*indrones*.png")) + \
+                     glob.glob(os.path.join(image_dir, "*logo*.png")) + \
+                     glob.glob(os.path.join(image_dir, "*indrones*.jpg")) + \
+                     glob.glob(os.path.join(image_dir, "*logo*.jpg"))
+                     
+    if possible_logos:
+        logo_path = possible_logos[0]
+        logo_filename = os.path.basename(logo_path)
+        logo_kml = f'''
+    <ScreenOverlay>
+      <name>Indrones Logo</name>
+      <Icon>
+        <href>{logo_filename}</href>
+      </Icon>
+      <overlayXY x="0" y="1" xunits="fraction" yunits="fraction"/>
+      <screenXY x="0.02" y="0.98" xunits="fraction" yunits="fraction"/>
+      <rotationXY x="0" y="0" xunits="fraction" yunits="fraction"/>
+      <size x="0.15" y="0" xunits="fraction" yunits="fraction"/>
+    </ScreenOverlay>'''
+
     kml_footer = '''  </Document>
 </kml>'''
     
     placemarks = []
-    for img in tagged_images:
-        filename = os.path.basename(img['path'])
-        lat = img['lat']
-        lng = img['lng']
-        alt = img['alt']
-        placemark = f'''
+    total_images = len(tagged_images)
+    
+    try:
+        with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as kmz:
+            # Add logo to KMZ if found
+            if logo_path and logo_filename:
+                kmz.write(logo_path, logo_filename)
+                
+            use_mp, workers = benchmark_and_get_workers(generate_thumbnail_worker, tagged_images, "Thumbnail Generation")
+            
+            print(f"\nGenerating thumbnails and creating KMZ ({total_images} images)...")
+            
+            if use_mp:
+                executor = concurrent.futures.ProcessPoolExecutor(max_workers=workers)
+                results_iter = executor.map(generate_thumbnail_worker, tagged_images)
+            else:
+                results_iter = map(generate_thumbnail_worker, tagged_images)
+                
+            for i, (img, (path, thumb_bytes, err)) in enumerate(zip(tagged_images, results_iter)):
+                filename = os.path.basename(img['path'])
+                lat = img['lat']
+                lng = img['lng']
+                alt = img['alt']
+                
+                # Print progress without a newline so "Done" or "Failed" can be appended
+                print(f"[{i+1}/{total_images}] Processing {filename}... ", end="", flush=True)
+                
+                if err:
+                    print(f"Failed! Error: {err}")
+                else:
+                    kmz.writestr(f'thumbnails/{filename}', thumb_bytes)
+                    print("Done.")
+                
+                placemark = f'''
     <Placemark>
       <name>{filename}</name>
+      <description><![CDATA[<img src="thumbnails/{filename}" width="400" />]]></description>
       <Point>
         <altitudeMode>absolute</altitudeMode>
         <coordinates>{lng},{lat},{alt}</coordinates>
       </Point>
     </Placemark>'''
-        placemarks.append(placemark)
-        
-    kml_content = kml_header + "".join(placemarks) + kml_footer
-    
-    try:
-        with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as kmz:
+                placemarks.append(placemark)
+                
+            if use_mp:
+                executor.shutdown()
+                
+            print("\nFinalizing KMZ archive... ", end="", flush=True)
+            kml_content = kml_header + logo_kml + "".join(placemarks) + kml_footer
             kmz.writestr('doc.kml', kml_content)
-        print(f"\nSuccessfully created KMZ file: {output_path}")
+            print("Done.")
+            
+        print(f"\nSuccessfully created KMZ file with thumbnails: {output_path}")
+    except PermissionError:
+        print(f"\nCritical Error: Permission denied when trying to write to {output_path}.")
+        print("Is the file currently open in another program (like Google Earth)? Please close it and try again.")
     except Exception as e:
-        print(f"\nError creating KMZ: {e}")
+        print(f"\nCritical Error creating KMZ: {e}")
 
 def main(bin_file, image_dir, alt_threshold=40.0):
     gps_data, cam_data = parse_bin_log(bin_file)
@@ -247,7 +365,23 @@ def main(bin_file, image_dir, alt_threshold=40.0):
         print("Error: No CAM messages found in log. Cannot auto-detect first air tag.")
         return
         
-    print(f"Found {len(gps_data)} GPS points and {len(cam_data)} CAM triggers.")
+    # Read images
+    search_pattern = os.path.join(image_dir, "*.[jJ][pP][gG]")
+    image_files = glob.glob(search_pattern)
+    images = []
+    
+    for img in image_files:
+        dt = get_exif_time(img)
+        if dt:
+            images.append({'path': img, 'time': dt})
+            
+    if not images:
+        print(f"Error: No images with EXIF time found in {image_dir}.")
+        return
+        
+    images.sort(key=lambda x: x['time'])
+    
+    print(f"Found {len(gps_data)} GPS points, {len(cam_data)} CAM triggers, and {len(images)} images.")
     
     # Find first CAM tag in the air
     ground_alt = gps_data[0]['alt']
@@ -264,21 +398,6 @@ def main(bin_file, image_dir, alt_threshold=40.0):
         
     print(f"First air CAM tag found at {first_air_cam['time']} (Alt: {first_air_cam['alt']:.2f}m)")
     
-    # Read images
-    search_pattern = os.path.join(image_dir, "*.[jJ][pP][gG]")
-    image_files = glob.glob(search_pattern)
-    images = []
-    
-    for img in image_files:
-        dt = get_exif_time(img)
-        if dt:
-            images.append({'path': img, 'time': dt})
-            
-    if not images:
-        print(f"Error: No images with EXIF time found in {image_dir}.")
-        return
-        
-    images.sort(key=lambda x: x['time'])
     first_image = images[0]
     print(f"First image time: {first_image['time']} (File: {os.path.basename(first_image['path'])})")
     
@@ -309,7 +428,7 @@ def main(bin_file, image_dir, alt_threshold=40.0):
     
     if tagged_images_data:
         kmz_path = os.path.join(image_dir, "geotags.kmz")
-        create_kmz(tagged_images_data, kmz_path)
+        create_kmz(tagged_images_data, kmz_path, image_dir)
         
         print(f"\nPlease review the generated KMZ file: {kmz_path}")
         
@@ -327,12 +446,25 @@ def main(bin_file, image_dir, alt_threshold=40.0):
                 
         if write_exif:
             print("\nStarting EXIF geotagging process...")
+            
+            use_mp, workers = benchmark_and_get_workers(set_gps_exif_worker, tagged_images_data, "EXIF Tagging")
+            
             tagged_count = 0
-            for img_data in tagged_images_data:
-                success = set_gps_exif(img_data['path'], img_data['lat'], img_data['lng'], img_data['alt'])
-                if success:
-                    tagged_count += 1
-                    print(f"Tagged {os.path.basename(img_data['path'])}")
+            
+            if use_mp:
+                with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                    results = executor.map(set_gps_exif_worker, tagged_images_data)
+                    for path, success in results:
+                        if success:
+                            tagged_count += 1
+                            print(f"Tagged {os.path.basename(path)}")
+            else:
+                for img_data in tagged_images_data:
+                    path, success = set_gps_exif_worker(img_data)
+                    if success:
+                        tagged_count += 1
+                        print(f"Tagged {os.path.basename(path)}")
+                        
             print(f"\nDone! Successfully tagged {tagged_count} out of {len(tagged_images_data)} images.")
         else:
             print("\nSkipping EXIF writing. Original images remain unmodified.")
