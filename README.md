@@ -3,6 +3,7 @@
 A zero-configuration Python script that automatically synchronizes and embeds highly accurate GPS coordinates from a drone's flight log (`.bin`) directly into the EXIF metadata of your aerial photographs (`.jpg`). 
 
 Perfect for drone mappers, surveyors, and hobbyists using standalone cameras (like GoPros, Sony Alpha, etc.) alongside ArduPilot/PX4 flight controllers.
+Here is the Video link explaining the script. https://youtu.be/oyemoNyeLf8
 
 ## ✨ Features
 * **Zero-Configuration Paths:** Just drop the script into the folder with your images and log file. It auto-detects everything.
